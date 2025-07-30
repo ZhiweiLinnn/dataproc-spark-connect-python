@@ -75,8 +75,21 @@ class DataprocRemoteSparkSessionBuilderTests(unittest.TestCase):
     @mock.patch(
         "google.cloud.dataproc_spark_connect.environment.get_client_environment_label"
     )
+    @mock.patch(
+        "IPython.core.interactiveshell.InteractiveShell.initialized",
+        return_value=True,
+    )
+    @mock.patch.dict(
+        "sys.modules",
+        {
+            "google.cloud.aiplatform.utils": mock.MagicMock(
+                _ipython_utils=mock.MagicMock()
+            ),
+        },
+    )
     def test_create_spark_session_with_default_notebook_behavior(
         self,
+        mock_interactive_shell,
         mock_is_s8s_session_active,
         mock_dataproc_session_id,
         mock_client_config,
@@ -90,7 +103,8 @@ class DataprocRemoteSparkSessionBuilderTests(unittest.TestCase):
             mock_session_controller_client.return_value
         )
 
-        mock_dataproc_session_id.return_value = "sc-20240702-103952-abcdef"
+        session_id = "sc-20240702-103952-abcdef"
+        mock_dataproc_session_id.return_value = session_id
         mock_client_config.return_value = ConfigResult.fromProto(
             ConfigResponse()
         )
@@ -108,6 +122,11 @@ class DataprocRemoteSparkSessionBuilderTests(unittest.TestCase):
             mock_operation
         )
         mock_get_client_environment_label.return_value = "unknown"
+        mock_ipython_utils = mock.sys.modules[
+            "google.cloud.aiplatform.utils"
+        ]._ipython_utils
+        test_session_url = f"https://console.cloud.google.com/dataproc/interactive/sessions/{session_id}/locations/test-region?project=test-project"
+        mock_display_link = mock_ipython_utils.display_link
 
         create_session_request = CreateSessionRequest()
         create_session_request.parent = (
@@ -143,6 +162,9 @@ class DataprocRemoteSparkSessionBuilderTests(unittest.TestCase):
             )
             mock_session_controller_client_instance.get_session.assert_called_once_with(
                 get_session_request
+            )
+            mock_display_link.assert_called_once_with(
+                "View Session Details", test_session_url, "dashboard"
             )
 
     @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")

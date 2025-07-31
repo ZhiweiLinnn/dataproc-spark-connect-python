@@ -57,6 +57,12 @@ from pyspark.sql.utils import to_str
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# System labels that should not be overridden by user
+SYSTEM_LABELS = {
+    "dataproc-session-client",
+    "goog-colab-notebook-id",
+}
+
 
 def _is_valid_label_value(value: str) -> bool:
     """
@@ -133,11 +139,95 @@ class DataprocSparkSession(SparkSession):
             return self
 
         def dataprocSessionConfig(self, dataproc_config: Session):
+            self._dataproc_config = dataproc_config
+            for k, v in dataproc_config.runtime_config.properties.items():
+                self._options[cast(str, k)] = to_str(v)
+            return self
+
+        @property
+        def dataproc_config(self):
             with self._lock:
-                self._dataproc_config = dataproc_config
-                for k, v in dataproc_config.runtime_config.properties.items():
-                    self._options[cast(str, k)] = to_str(v)
-                return self
+                self._dataproc_config = self._dataproc_config or Session()
+                return self._dataproc_config
+
+        def runtimeVersion(self, version: str):
+            self.dataproc_config.runtime_config.version = version
+            return self
+
+        def serviceAccount(self, account: str):
+            self.dataproc_config.environment_config.execution_config.service_account = (
+                account
+            )
+            # Automatically set auth type to SERVICE_ACCOUNT when service account is provided
+            # This overrides any env var setting to simplify user experience
+            self.dataproc_config.environment_config.execution_config.authentication_config.user_workload_authentication_type = (
+                AuthenticationConfig.AuthenticationType.SERVICE_ACCOUNT
+            )
+            return self
+
+        def authType(
+            self, auth_type: "AuthenticationConfig.AuthenticationType"
+        ):
+            self.dataproc_config.environment_config.execution_config.authentication_config.user_workload_authentication_type = (
+                auth_type
+            )
+            return self
+
+        def subnetwork(self, subnet: str):
+            self.dataproc_config.environment_config.execution_config.subnetwork_uri = (
+                subnet
+            )
+            return self
+
+        def ttl(self, duration: datetime.timedelta):
+            """Set the time-to-live (TTL) for the session using a timedelta object."""
+            self.dataproc_config.environment_config.execution_config.ttl = {
+                "seconds": int(duration.total_seconds())
+            }
+            return self
+
+        def ttlSeconds(self, seconds: int):
+            """Set the time-to-live (TTL) for the session in seconds."""
+            self.dataproc_config.environment_config.execution_config.ttl = {
+                "seconds": seconds
+            }
+            return self
+
+        def idleTtl(self, duration: datetime.timedelta):
+            """Set the idle time-to-live (idle TTL) for the session using a timedelta object."""
+            self.dataproc_config.environment_config.execution_config.idle_ttl = {
+                "seconds": int(duration.total_seconds())
+            }
+            return self
+
+        def idleTtlSeconds(self, seconds: int):
+            """Set the idle time-to-live (idle TTL) for the session in seconds."""
+            self.dataproc_config.environment_config.execution_config.idle_ttl = {
+                "seconds": seconds
+            }
+            return self
+
+        def sessionTemplate(self, template: str):
+            self.dataproc_config.session_template = template
+            return self
+
+        def label(self, key: str, value: str):
+            """Add a single label to the session."""
+            return self.labels({key: value})
+
+        def labels(self, labels: Dict[str, str]):
+            # Filter out system labels and warn user
+            filtered_labels = {}
+            for key, value in labels.items():
+                if key in SYSTEM_LABELS:
+                    logger.warning(
+                        f"Label '{key}' is a system label and cannot be overridden by user. Ignoring."
+                    )
+                else:
+                    filtered_labels[key] = value
+
+            self.dataproc_config.labels.update(filtered_labels)
+            return self
 
         def remote(self, url: Optional[str] = None) -> "SparkSession.Builder":
             if url:
@@ -400,11 +490,10 @@ class DataprocSparkSession(SparkSession):
                 return session
 
         def _get_dataproc_config(self):
-            dataproc_config = Session()
-            if self._dataproc_config:
-                dataproc_config = self._dataproc_config
-                for k, v in self._options.items():
-                    dataproc_config.runtime_config.properties[k] = v
+            # Use the property to ensure we always have a config
+            dataproc_config = self.dataproc_config
+            for k, v in self._options.items():
+                dataproc_config.runtime_config.properties[k] = v
             dataproc_config.spark_connect_session = (
                 sessions.SparkConnectConfig()
             )
@@ -469,7 +558,7 @@ class DataprocSparkSession(SparkSession):
                         f"Only lowercase letters, numbers, and dashes are allowed. "
                         f"The value must start with lowercase letter or number and end with a lowercase letter or number. "
                         f"Maximum length is 63 characters. "
-                        f"Skipping notebook ID label."
+                        f"Ignoring notebook ID label."
                     )
             default_datasource = os.getenv(
                 "DATAPROC_SPARK_CONNECT_DEFAULT_DATASOURCE"

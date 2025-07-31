@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from copy import deepcopy
+import datetime
 import os
 import unittest
 
@@ -63,6 +64,43 @@ class DataprocRemoteSparkSessionBuilderTests(unittest.TestCase):
         if session is not None:
             session.stop()
 
+    @staticmethod
+    def _setup_session_creation_mocks(
+        mock_is_s8s_session_active,
+        mock_dataproc_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+        session_id="sc-20240702-103952-abcdef",
+        session_uuid="c002e4ef-fe5e-41a8-a157-160aa73e4f7f",
+    ):
+        """Helper method to set up common mocks for session creation tests."""
+        mock_is_s8s_session_active.return_value = True
+        mock_session_controller_client_instance = (
+            mock_session_controller_client.return_value
+        )
+        mock_dataproc_session_id.return_value = session_id
+        mock_client_config.return_value = ConfigResult.fromProto(
+            ConfigResponse()
+        )
+
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+
+        mock_operation = mock.Mock()
+        session_response = Session()
+        session_response.runtime_info.endpoints = {
+            "Spark Connect Server": "sc://spark-connect-server.example.com:443"
+        }
+        session_response.uuid = session_uuid
+        mock_operation.result.side_effect = [session_response]
+        mock_session_controller_client_instance.create_session.return_value = (
+            mock_operation
+        )
+
+        return mock_session_controller_client_instance
+
     @mock.patch("google.auth.default")
     @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
     @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
@@ -90,15 +128,15 @@ class DataprocRemoteSparkSessionBuilderTests(unittest.TestCase):
     def test_create_spark_session_with_default_notebook_behavior(
         self,
         mock_interactive_shell,
+        mock_get_client_environment_label,
         mock_is_s8s_session_active,
         mock_dataproc_session_id,
         mock_client_config,
         mock_session_controller_client,
         mock_credentials,
-        mock_get_client_environment_label,
     ):
         session = None
-        mock_is_s8s_session_active.return_value = True
+        mock_is_s8s_session_active.return_value = False  # No existing session
         mock_session_controller_client_instance = (
             mock_session_controller_client.return_value
         )
@@ -144,7 +182,11 @@ class DataprocRemoteSparkSessionBuilderTests(unittest.TestCase):
             "unknown"
         )
         try:
-            session = DataprocSparkSession.builder.getOrCreate()
+            session = (
+                DataprocSparkSession.builder.projectId("test-project")
+                .location("test-region")
+                .getOrCreate()
+            )
             mock_session_controller_client_instance.create_session.assert_called_once_with(
                 create_session_request
             )
@@ -1404,7 +1446,7 @@ class DataprocRemoteSparkSessionBuilderTests(unittest.TestCase):
                 warning_call_args,
             )
             self.assertIn("Maximum length is 63 characters", warning_call_args)
-            self.assertIn("Skipping notebook ID label", warning_call_args)
+            self.assertIn("Ignoring notebook ID label", warning_call_args)
 
         finally:
             mock_session_controller_client_instance.terminate_session.return_value = (
@@ -1503,6 +1545,43 @@ class DataprocSparkConnectClientTest(unittest.TestCase):
         )
         if session is not None:
             session.stop()
+
+    @staticmethod
+    def _setup_session_creation_mocks(
+        mock_is_s8s_session_active,
+        mock_dataproc_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+        session_id="sc-20240702-103952-abcdef",
+        session_uuid="c002e4ef-fe5e-41a8-a157-160aa73e4f7f",
+    ):
+        """Helper method to set up common mocks for session creation tests."""
+        mock_is_s8s_session_active.return_value = True
+        mock_session_controller_client_instance = (
+            mock_session_controller_client.return_value
+        )
+        mock_dataproc_session_id.return_value = session_id
+        mock_client_config.return_value = ConfigResult.fromProto(
+            ConfigResponse()
+        )
+
+        cred = mock.MagicMock()
+        cred.token = "token"
+        mock_credentials.return_value = (cred, "")
+
+        mock_operation = mock.Mock()
+        session_response = Session()
+        session_response.runtime_info.endpoints = {
+            "Spark Connect Server": "sc://spark-connect-server.example.com:443"
+        }
+        session_response.uuid = session_uuid
+        mock_operation.result.side_effect = [session_response]
+        mock_session_controller_client_instance.create_session.return_value = (
+            mock_operation
+        )
+
+        return mock_session_controller_client_instance
 
     @mock.patch("google.auth.default")
     @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
@@ -1750,6 +1829,452 @@ class DataprocSparkConnectClientTest(unittest.TestCase):
     @mock.patch(
         "google.cloud.dataproc_spark_connect.session.is_s8s_session_active"
     )
+    def test_builder_pattern_runtime_config(
+        self,
+        mock_is_s8s_session_active,
+        mock_dataproc_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        session = None
+        mock_session_controller_client_instance = (
+            self._setup_session_creation_mocks(
+                mock_is_s8s_session_active,
+                mock_dataproc_session_id,
+                mock_client_config,
+                mock_session_controller_client,
+                mock_credentials,
+            )
+        )
+
+        try:
+            session = (
+                DataprocSparkSession.builder.runtimeVersion("2.4")
+                .config(
+                    "spark.executor.cores", "8"
+                )  # Use existing Spark config method
+                .config("spark.executor.memory", "4g")
+                .config("spark.sql.adaptive.enabled", "true")
+                .getOrCreate()
+            )
+
+            # Verify the session was created with the correct runtime config
+            create_session_request = mock_session_controller_client_instance.create_session.call_args[
+                0
+            ][
+                0
+            ]
+            self.assertEqual(
+                create_session_request.session.runtime_config.version, "2.4"
+            )
+            # Note: Spark configs are handled through existing Spark mechanisms
+            # The key is that runtimeVersion works correctly
+
+        finally:
+            mock_session_controller_client_instance.terminate_session.return_value = (
+                mock.Mock()
+            )
+            self.stopSession(mock_session_controller_client_instance, session)
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.DataprocSparkSession.Builder.generate_dataproc_session_id"
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.session.is_s8s_session_active"
+    )
+    def test_builder_pattern_environment_config(
+        self,
+        mock_is_s8s_session_active,
+        mock_dataproc_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        session = None
+        mock_session_controller_client_instance = (
+            self._setup_session_creation_mocks(
+                mock_is_s8s_session_active,
+                mock_dataproc_session_id,
+                mock_client_config,
+                mock_session_controller_client,
+                mock_credentials,
+            )
+        )
+
+        try:
+            session = (
+                DataprocSparkSession.builder.serviceAccount(
+                    "test-service@project.iam.gserviceaccount.com"
+                )
+                .subnetwork(
+                    "projects/test-project/regions/us-central1/subnetworks/test-subnet"
+                )
+                .ttlSeconds(3600)
+                .idleTtlSeconds(1800)
+                .getOrCreate()
+            )
+
+            # Verify the session was created with the correct environment config
+            create_session_request = mock_session_controller_client_instance.create_session.call_args[
+                0
+            ][
+                0
+            ]
+            self.assertEqual(
+                create_session_request.session.environment_config.execution_config.service_account,
+                "test-service@project.iam.gserviceaccount.com",
+            )
+            self.assertEqual(
+                create_session_request.session.environment_config.execution_config.authentication_config.user_workload_authentication_type,
+                AuthenticationConfig.AuthenticationType.SERVICE_ACCOUNT,
+            )
+            self.assertEqual(
+                create_session_request.session.environment_config.execution_config.subnetwork_uri,
+                "projects/test-project/regions/us-central1/subnetworks/test-subnet",
+            )
+            # TTL can be represented as either timedelta or dict with seconds
+            ttl_value = (
+                create_session_request.session.environment_config.execution_config.ttl
+            )
+            if isinstance(ttl_value, datetime.timedelta):
+                self.assertEqual(ttl_value.total_seconds(), 3600)
+            else:
+                self.assertEqual(ttl_value, {"seconds": 3600})
+
+            idle_ttl_value = (
+                create_session_request.session.environment_config.execution_config.idle_ttl
+            )
+            if isinstance(idle_ttl_value, datetime.timedelta):
+                self.assertEqual(idle_ttl_value.total_seconds(), 1800)
+            else:
+                self.assertEqual(idle_ttl_value, {"seconds": 1800})
+
+        finally:
+            mock_session_controller_client_instance.terminate_session.return_value = (
+                mock.Mock()
+            )
+            self.stopSession(mock_session_controller_client_instance, session)
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.DataprocSparkSession.Builder.generate_dataproc_session_id"
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.session.is_s8s_session_active"
+    )
+    def test_builder_pattern_ttl_with_timedelta(
+        self,
+        mock_is_s8s_session_active,
+        mock_dataproc_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        session = None
+        mock_session_controller_client_instance = (
+            self._setup_session_creation_mocks(
+                mock_is_s8s_session_active,
+                mock_dataproc_session_id,
+                mock_client_config,
+                mock_session_controller_client,
+                mock_credentials,
+            )
+        )
+
+        try:
+            # Test using timedelta objects
+            session = (
+                DataprocSparkSession.builder.ttl(datetime.timedelta(hours=1))
+                .idleTtl(datetime.timedelta(minutes=30))
+                .getOrCreate()
+            )
+
+            # Verify the session was created with the correct TTL values
+            create_session_request = mock_session_controller_client_instance.create_session.call_args[
+                0
+            ][
+                0
+            ]
+
+            # TTL should be 3600 seconds (1 hour)
+            ttl_value = (
+                create_session_request.session.environment_config.execution_config.ttl
+            )
+            if isinstance(ttl_value, datetime.timedelta):
+                self.assertEqual(ttl_value.total_seconds(), 3600)
+            else:
+                self.assertEqual(ttl_value, {"seconds": 3600})
+
+            # Idle TTL should be 1800 seconds (30 minutes)
+            idle_ttl_value = (
+                create_session_request.session.environment_config.execution_config.idle_ttl
+            )
+            if isinstance(idle_ttl_value, datetime.timedelta):
+                self.assertEqual(idle_ttl_value.total_seconds(), 1800)
+            else:
+                self.assertEqual(idle_ttl_value, {"seconds": 1800})
+
+        finally:
+            mock_session_controller_client_instance.terminate_session.return_value = (
+                mock.Mock()
+            )
+            self.stopSession(mock_session_controller_client_instance, session)
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.DataprocSparkSession.Builder.generate_dataproc_session_id"
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.session.is_s8s_session_active"
+    )
+    def test_builder_pattern_session_template_and_labels(
+        self,
+        mock_is_s8s_session_active,
+        mock_dataproc_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        session = None
+        mock_session_controller_client_instance = (
+            self._setup_session_creation_mocks(
+                mock_is_s8s_session_active,
+                mock_dataproc_session_id,
+                mock_client_config,
+                mock_session_controller_client,
+                mock_credentials,
+            )
+        )
+
+        try:
+            session = (
+                DataprocSparkSession.builder.sessionTemplate(
+                    "projects/test-project/locations/us-central1/sessionTemplates/test-template"
+                )
+                .label("environment", "production")
+                .label("team", "data-science")
+                .labels({"cost-center": "engineering", "version": "1.0"})
+                .getOrCreate()
+            )
+
+            # Verify the session was created with the correct session template and labels
+            create_session_request = mock_session_controller_client_instance.create_session.call_args[
+                0
+            ][
+                0
+            ]
+            self.assertEqual(
+                create_session_request.session.session_template,
+                "projects/test-project/locations/us-central1/sessionTemplates/test-template",
+            )
+            self.assertEqual(
+                create_session_request.session.labels["environment"],
+                "production",
+            )
+            self.assertEqual(
+                create_session_request.session.labels["team"], "data-science"
+            )
+            self.assertEqual(
+                create_session_request.session.labels["cost-center"],
+                "engineering",
+            )
+            self.assertEqual(
+                create_session_request.session.labels["version"], "1.0"
+            )
+
+        finally:
+            mock_session_controller_client_instance.terminate_session.return_value = (
+                mock.Mock()
+            )
+            self.stopSession(mock_session_controller_client_instance, session)
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.DataprocSparkSession.Builder.generate_dataproc_session_id"
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.session.is_s8s_session_active"
+    )
+    def test_builder_pattern_combined_with_dataprocSessionConfig(
+        self,
+        mock_is_s8s_session_active,
+        mock_dataproc_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        session = None
+        mock_session_controller_client_instance = (
+            self._setup_session_creation_mocks(
+                mock_is_s8s_session_active,
+                mock_dataproc_session_id,
+                mock_client_config,
+                mock_session_controller_client,
+                mock_credentials,
+            )
+        )
+
+        try:
+            # Test combining dataprocSessionConfig with builder pattern methods
+            base_config = Session()
+            base_config.runtime_config.version = "2.2"
+            base_config.runtime_config.properties["spark.executor.cores"] = "4"
+            base_config.labels["base-label"] = "base-value"
+
+            session = (
+                DataprocSparkSession.builder.dataprocSessionConfig(base_config)
+                .config(
+                    "spark.executor.cores", "8"
+                )  # Override using existing Spark method
+                .config(
+                    "spark.executor.memory", "4g"
+                )  # Add new using existing Spark method
+                .label("additional-label", "additional-value")  # Add new
+                .getOrCreate()
+            )
+
+            # Verify the session was created with combined config
+            create_session_request = mock_session_controller_client_instance.create_session.call_args[
+                0
+            ][
+                0
+            ]
+            self.assertEqual(
+                create_session_request.session.runtime_config.version, "2.2"
+            )
+            self.assertEqual(
+                create_session_request.session.labels["base-label"],
+                "base-value",
+            )  # From base config
+            self.assertEqual(
+                create_session_request.session.labels["additional-label"],
+                "additional-value",
+            )  # Added
+
+        finally:
+            mock_session_controller_client_instance.terminate_session.return_value = (
+                mock.Mock()
+            )
+            self.stopSession(mock_session_controller_client_instance, session)
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.DataprocSparkSession.Builder.generate_dataproc_session_id"
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.session.is_s8s_session_active"
+    )
+    @mock.patch("google.cloud.dataproc_spark_connect.session.logger")
+    def test_builder_pattern_system_label_protection(
+        self,
+        mock_logger,
+        mock_is_s8s_session_active,
+        mock_dataproc_session_id,
+        mock_client_config,
+        mock_session_controller_client,
+        mock_credentials,
+    ):
+        session = None
+        mock_session_controller_client_instance = (
+            self._setup_session_creation_mocks(
+                mock_is_s8s_session_active,
+                mock_dataproc_session_id,
+                mock_client_config,
+                mock_session_controller_client,
+                mock_credentials,
+            )
+        )
+
+        try:
+            session = (
+                DataprocSparkSession.builder.label(
+                    "dataproc-session-client", "malicious-override"
+                )  # Try to override system label
+                .label(
+                    "goog-colab-notebook-id", "fake-notebook"
+                )  # Try to override system label
+                .label("user-label", "allowed-value")  # This should work
+                .labels(
+                    {
+                        "dataproc-session-client": "another-attempt",
+                        "valid-label": "valid-value",
+                    }
+                )
+                .getOrCreate()
+            )
+
+            # Verify system labels were protected
+            create_session_request = mock_session_controller_client_instance.create_session.call_args[
+                0
+            ][
+                0
+            ]
+
+            # System labels should not be overridden
+            self.assertNotEqual(
+                create_session_request.session.labels.get(
+                    "dataproc-session-client"
+                ),
+                "malicious-override",
+            )
+            self.assertNotEqual(
+                create_session_request.session.labels.get(
+                    "goog-colab-notebook-id"
+                ),
+                "fake-notebook",
+            )
+
+            # User labels should be allowed
+            self.assertEqual(
+                create_session_request.session.labels["user-label"],
+                "allowed-value",
+            )
+            self.assertEqual(
+                create_session_request.session.labels["valid-label"],
+                "valid-value",
+            )
+
+            # Verify warnings were logged
+            expected_calls = [
+                mock.call(
+                    "Label 'dataproc-session-client' is a system label and cannot be overridden by user. Ignoring."
+                ),
+                mock.call(
+                    "Label 'goog-colab-notebook-id' is a system label and cannot be overridden by user. Ignoring."
+                ),
+                mock.call(
+                    "Label 'dataproc-session-client' is a system label and cannot be overridden by user. Ignoring."
+                ),
+            ]
+            mock_logger.warning.assert_has_calls(expected_calls, any_order=True)
+
+        finally:
+            mock_session_controller_client_instance.terminate_session.return_value = (
+                mock.Mock()
+            )
+            self.stopSession(mock_session_controller_client_instance, session)
+
+    @mock.patch("google.auth.default")
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    @mock.patch("pyspark.sql.connect.client.SparkConnectClient.config")
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.DataprocSparkSession.Builder.generate_dataproc_session_id"
+    )
+    @mock.patch(
+        "google.cloud.dataproc_spark_connect.session.is_s8s_session_active"
+    )
     @mock.patch(
         "google.cloud.dataproc_spark_connect.environment.get_client_environment_label"
     )
@@ -1816,6 +2341,7 @@ class DataprocSparkConnectClientTest(unittest.TestCase):
                     "6fa459ea-ee8a-3ca4-894e-db77e160355e"
                 )
                 expected_request.session.name = "projects/test-project/locations/test-region/sessions/6fa459ea-ee8a-3ca4-894e-db77e160355e"
+                expected_request.session.runtime_config.version = "2.3"
                 expected_request.session.spark_connect_session = (
                     SparkConnectConfig()
                 )
@@ -1829,7 +2355,12 @@ class DataprocSparkConnectClientTest(unittest.TestCase):
                     DataprocSparkSession._active_s8s_session_id = None
                     DataprocSparkSession._default_session = None
 
-                    session = DataprocSparkSession.builder.getOrCreate()
+                    # Set up project and region for the builder
+                    session = (
+                        DataprocSparkSession.builder.projectId("test-project")
+                        .location("test-region")
+                        .getOrCreate()
+                    )
 
                     mock_get_client_environment_label.assert_called_once()
                     mock_session_controller_client_instance.create_session.assert_called_once_with(

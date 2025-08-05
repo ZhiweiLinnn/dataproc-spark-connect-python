@@ -103,7 +103,7 @@ class DataprocSparkSession(SparkSession):
     ... ) # doctest: +SKIP
     """
 
-    _DEFAULT_RUNTIME_VERSION = "2.3"
+    _DEFAULT_RUNTIME_VERSION = "3.0"
 
     _active_s8s_session_uuid: ClassVar[Optional[str]] = None
     _project_id = None
@@ -158,19 +158,6 @@ class DataprocSparkSession(SparkSession):
             self.dataproc_config.environment_config.execution_config.service_account = (
                 account
             )
-            # Automatically set auth type to SERVICE_ACCOUNT when service account is provided
-            # This overrides any env var setting to simplify user experience
-            self.dataproc_config.environment_config.execution_config.authentication_config.user_workload_authentication_type = (
-                AuthenticationConfig.AuthenticationType.SERVICE_ACCOUNT
-            )
-            return self
-
-        def authType(
-            self, auth_type: "AuthenticationConfig.AuthenticationType"
-        ):
-            self.dataproc_config.environment_config.execution_config.authentication_config.user_workload_authentication_type = (
-                auth_type
-            )
             return self
 
         def subnetwork(self, subnet: str):
@@ -181,10 +168,7 @@ class DataprocSparkSession(SparkSession):
 
         def ttl(self, duration: datetime.timedelta):
             """Set the time-to-live (TTL) for the session using a timedelta object."""
-            self.dataproc_config.environment_config.execution_config.ttl = {
-                "seconds": int(duration.total_seconds())
-            }
-            return self
+            return self.ttlSeconds(int(duration.total_seconds()))
 
         def ttlSeconds(self, seconds: int):
             """Set the time-to-live (TTL) for the session in seconds."""
@@ -195,10 +179,7 @@ class DataprocSparkSession(SparkSession):
 
         def idleTtl(self, duration: datetime.timedelta):
             """Set the idle time-to-live (idle TTL) for the session using a timedelta object."""
-            self.dataproc_config.environment_config.execution_config.idle_ttl = {
-                "seconds": int(duration.total_seconds())
-            }
-            return self
+            return self.idleTtlSeconds(int(duration.total_seconds()))
 
         def idleTtlSeconds(self, seconds: int):
             """Set the idle time-to-live (idle TTL) for the session in seconds."""
@@ -568,27 +549,24 @@ class DataprocSparkSession(SparkSession):
             default_datasource = os.getenv(
                 "DATAPROC_SPARK_CONNECT_DEFAULT_DATASOURCE"
             )
-            if (
-                default_datasource
-                and dataproc_config.runtime_config.version == "2.3"
-            ):
-                if default_datasource == "bigquery":
-                    bq_datasource_properties = {
+            match default_datasource:
+                case "bigquery":
+                    # Merge default configs with existing properties,
+                    # user configs take precedence
+                    for k, v in {
                         "spark.datasource.bigquery.viewsEnabled": "true",
                         "spark.datasource.bigquery.writeMethod": "direct",
                         "spark.sql.catalog.spark_catalog": "com.google.cloud.spark.bigquery.BigQuerySparkSessionCatalog",
-                        "spark.sql.legacy.createHiveTableByDefault": "false",
                         "spark.sql.sources.default": "bigquery",
-                    }
-                    # Merge default configs with existing properties, user configs take precedence
-                    for k, v in bq_datasource_properties.items():
+                    }.items():
                         if k not in dataproc_config.runtime_config.properties:
                             dataproc_config.runtime_config.properties[k] = v
-                else:
-                    logger.warning(
-                        f"DATAPROC_SPARK_CONNECT_DEFAULT_DATASOURCE is set to an invalid value:"
-                        f" {default_datasource}. Supported value is 'bigquery'."
-                    )
+                case _:
+                    if default_datasource:
+                        logger.warning(
+                            f"DATAPROC_SPARK_CONNECT_DEFAULT_DATASOURCE is set to an invalid value:"
+                            f" {default_datasource}. Supported value is 'bigquery'."
+                        )
             return dataproc_config
 
         def _check_python_version_compatibility(self, runtime_version):
@@ -598,9 +576,7 @@ class DataprocSparkSession(SparkSession):
 
             # Runtime version to server Python version mapping
             RUNTIME_PYTHON_MAP = {
-                "1.2": (3, 12),
-                "2.2": (3, 12),
-                "2.3": (3, 11),
+                "3.0": (3, 11),
             }
 
             client_python = sys.version_info[:2]  # (major, minor)
@@ -813,7 +789,7 @@ class DataprocSparkSession(SparkSession):
         This is an API dedicated to Spark Connect client only. With regular Spark Session, it throws
         an exception.
         Regarding pypi: Popular packages are already pre-installed in s8s runtime.
-        https://cloud.google.com/dataproc-serverless/docs/concepts/versions/spark-runtime-2.2#python_libraries
+        https://cloud.google.com/dataproc-serverless/docs/concepts/versions/spark-runtime-2.3#python_libraries
         If there are conflicts/package doesn't exist, it throws an exception.
         """
         if sum([pypi, file, pyfile, archive]) > 1:

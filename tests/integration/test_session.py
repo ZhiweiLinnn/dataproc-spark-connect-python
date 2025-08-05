@@ -33,13 +33,13 @@ from google.cloud.dataproc_v1 import (
 )
 from pyspark.errors.exceptions import connect as connect_exceptions
 from pyspark.sql import functions as F
-from pyspark.sql.types import IntegerType, StringType
+from pyspark.sql.types import StringType
 
 
 _SERVICE_ACCOUNT_KEY_FILE_ = "service_account_key.json"
 
 
-@pytest.fixture(params=[None, "2.2", "3.0"])
+@pytest.fixture(params=[None, "3.0"])
 def image_version(request):
     return request.param
 
@@ -78,6 +78,8 @@ def os_environment(auth_type, image_version, test_project, test_region):
             _SERVICE_ACCOUNT_KEY_FILE_
         )
     os.environ["DATAPROC_SPARK_CONNECT_AUTH_TYPE"] = auth_type
+    if auth_type == "END_USER_CREDENTIALS":
+        os.environ.pop("DATAPROC_SPARK_CONNECT_SERVICE_ACCOUNT")
     # Add SSL certificate fix
     os.environ["SSL_CERT_FILE"] = certifi.where()
     os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()

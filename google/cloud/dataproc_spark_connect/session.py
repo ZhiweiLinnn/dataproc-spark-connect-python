@@ -593,20 +593,33 @@ class DataprocSparkSession(SparkSession):
             self._check_python_version_compatibility(
                 dataproc_config.runtime_config.version
             )
+
+            # Use local variable to improve readability of deeply nested attribute access
+            exec_config = dataproc_config.environment_config.execution_config
+
+            # Set service account from environment if not already set
             if (
-                not dataproc_config.environment_config.execution_config.authentication_config.user_workload_authentication_type
-                and "DATAPROC_SPARK_CONNECT_AUTH_TYPE" in os.environ
-            ):
-                dataproc_config.environment_config.execution_config.authentication_config.user_workload_authentication_type = AuthenticationConfig.AuthenticationType[
-                    os.getenv("DATAPROC_SPARK_CONNECT_AUTH_TYPE")
-                ]
-            if (
-                not dataproc_config.environment_config.execution_config.service_account
+                not exec_config.service_account
                 and "DATAPROC_SPARK_CONNECT_SERVICE_ACCOUNT" in os.environ
             ):
-                dataproc_config.environment_config.execution_config.service_account = os.getenv(
+                exec_config.service_account = os.getenv(
                     "DATAPROC_SPARK_CONNECT_SERVICE_ACCOUNT"
                 )
+
+            # Auto-set authentication type to SERVICE_ACCOUNT when service account is provided
+            if exec_config.service_account:
+                # When service account is provided, explicitly set auth type to SERVICE_ACCOUNT
+                exec_config.authentication_config.user_workload_authentication_type = (
+                    AuthenticationConfig.AuthenticationType.SERVICE_ACCOUNT
+                )
+            elif (
+                not exec_config.authentication_config.user_workload_authentication_type
+                and "DATAPROC_SPARK_CONNECT_AUTH_TYPE" in os.environ
+            ):
+                # Only set auth type from environment if no service account is present
+                exec_config.authentication_config.user_workload_authentication_type = AuthenticationConfig.AuthenticationType[
+                    os.getenv("DATAPROC_SPARK_CONNECT_AUTH_TYPE")
+                ]
             if (
                 not dataproc_config.environment_config.execution_config.subnetwork_uri
                 and "DATAPROC_SPARK_CONNECT_SUBNET" in os.environ
@@ -673,6 +686,7 @@ class DataprocSparkSession(SparkSession):
                             f"DATAPROC_SPARK_CONNECT_DEFAULT_DATASOURCE is set to an invalid value:"
                             f" {default_datasource}. Supported value is 'bigquery'."
                         )
+
             return dataproc_config
 
         def _check_python_version_compatibility(self, runtime_version):

@@ -381,6 +381,29 @@ class DataprocSparkSession(SparkSession):
                             logger.error(
                                 f"Exception while writing active session to file {file_path}, {e}"
                             )
+                except KeyboardInterrupt:
+                    stop_create_session_pbar_event.set()
+                    if create_session_pbar_thread.is_alive():
+                        create_session_pbar_thread.join()
+                    print("\nSession creation cancelled by user.")
+                    if DataprocSparkSession._active_s8s_session_id:
+                        print(
+                            f"Terminating Dataproc session: {DataprocSparkSession._active_s8s_session_id}"
+                        )
+                        # Terminate the session in a separate thread to avoid blocking
+                        termination_thread = threading.Thread(
+                            target=terminate_s8s_session,
+                            args=(
+                                self._project_id,
+                                self._region,
+                                DataprocSparkSession._active_s8s_session_id,
+                                self._client_options,
+                            ),
+                        )
+                        termination_thread.start()
+                        DataprocSparkSession._active_s8s_session_id = None
+                        print("Dataproc session termination initiated.")
+                    return None
                 except (InvalidArgument, PermissionDenied) as e:
                     stop_create_session_pbar_event.set()
                     if create_session_pbar_thread.is_alive():

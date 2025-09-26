@@ -859,30 +859,33 @@ class DataprocSparkSession(SparkSession):
     def _get_active_session_file_path():
         return os.getenv("DATAPROC_SPARK_CONNECT_ACTIVE_SESSION_FILE_PATH")
 
-    def stop(self) -> None:
+    @staticmethod
+    def stop() -> None:
         with DataprocSparkSession._lock:
             if DataprocSparkSession._active_s8s_session_id is not None:
                 terminate_s8s_session(
                     DataprocSparkSession._project_id,
                     DataprocSparkSession._region,
                     DataprocSparkSession._active_s8s_session_id,
-                    self._client_options,
+                    DataprocSparkSession._client_options,
                 )
 
-                self._remove_stopped_session_from_file()
+                DataprocSparkSession._remove_stopped_session_from_file()
                 DataprocSparkSession._active_s8s_session_uuid = None
                 DataprocSparkSession._active_s8s_session_id = None
                 DataprocSparkSession._project_id = None
                 DataprocSparkSession._region = None
                 DataprocSparkSession._client_options = None
 
-            self.client.close()
-            if self is DataprocSparkSession._default_session:
-                DataprocSparkSession._default_session = None
-            if self is getattr(
-                DataprocSparkSession._active_session, "session", None
-            ):
-                DataprocSparkSession._active_session.session = None
+            session = DataprocSparkSession.getActiveSession()
+            if session is not None:
+                session.client.close()
+                if session is DataprocSparkSession._default_session:
+                    DataprocSparkSession._default_session = None
+                if session is getattr(
+                    DataprocSparkSession._active_session, "session", None
+                ):
+                    DataprocSparkSession._active_session.session = None
 
 
 def terminate_s8s_session(

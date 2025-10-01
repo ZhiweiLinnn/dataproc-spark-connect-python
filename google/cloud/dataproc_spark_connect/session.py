@@ -472,6 +472,27 @@ class DataprocSparkSession(SparkSession):
                     session_response, dataproc_config.name
                 )
 
+        def _wait_for_session_available(
+            self, session_name: str, timeout: int = 300
+        ) -> Session:
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                try:
+                    session = self.session_controller_client.get_session(
+                        name=session_name
+                    )
+                    if "Spark Connect Server" in session.runtime_info.endpoints:
+                        return session
+                    time.sleep(5)
+                except Exception as e:
+                    logger.warning(
+                        f"Error while polling for Spark Connect endpoint: {e}"
+                    )
+                    time.sleep(5)
+            raise RuntimeError(
+                f"Spark Connect endpoint not available for session {session_name} after {timeout} seconds."
+            )
+
         def _display_session_link_on_creation(self, session_id):
             session_url = f"https://console.cloud.google.com/dataproc/interactive/{self._region}/{session_id}?project={self._project_id}"
             plain_message = f"Creating Dataproc Session: {session_url}"
@@ -537,6 +558,9 @@ class DataprocSparkSession(SparkSession):
                 )
                 self._display_view_session_details_button(s8s_session_id)
                 if session is None:
+                    session_response = self._wait_for_session_available(
+                        session_name
+                    )
                     session = self.__create_spark_connect_session_from_s8s(
                         session_response, session_name
                     )

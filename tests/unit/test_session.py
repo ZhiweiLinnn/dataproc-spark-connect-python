@@ -1143,7 +1143,7 @@ class DataprocRemoteSparkSessionBuilderTests(unittest.TestCase):
             mock_session_controller_client_instance.create_session.reset_mock()
             mock_logger.warning.reset_mock()
 
-    @mock.patch("sys.modules", {"google.cloud.aiplatform": None})
+    @mock.patch.dict("sys.modules", {"google.cloud.aiplatform": None})
     @mock.patch(
         "IPython.core.interactiveshell.InteractiveShell.initialized",
         return_value=True,
@@ -2399,6 +2399,77 @@ class DataprocSparkConnectClientTest(unittest.TestCase):
                 mock.Mock()
             )
             self.stopSession(mock_session_controller_client_instance, session)
+
+    @mock.patch("time.sleep", return_value=None)
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    def test_wait_for_session_available_success(
+        self, mock_session_controller_client, mock_sleep
+    ):
+        """Test that the method waits and returns the session when the endpoint appears."""
+        mock_client = mock_session_controller_client.return_value
+        session_name = (
+            "projects/test-project/locations/test-region/sessions/test-session"
+        )
+
+        # Session without the endpoint
+        session_pending = Session()
+        session_pending.name = session_name
+
+        # Session with the endpoint
+        session_ready = Session()
+        session_ready.name = session_name
+        session_ready.runtime_info.endpoints["Spark Connect Server"] = (
+            "sc://example.com:443"
+        )
+
+        # Mock get_session to return pending, then ready
+        mock_client.get_session.side_effect = [
+            session_pending,
+            session_pending,
+            session_ready,
+        ]
+
+        builder = DataprocSparkSession.Builder()
+        builder._session_controller_client = (
+            mock_client  # Inject the mock client
+        )
+
+        result = builder._wait_for_session_available(session_name, timeout=10)
+
+        self.assertEqual(result, session_ready)
+        self.assertEqual(mock_client.get_session.call_count, 3)
+        self.assertEqual(mock_sleep.call_count, 2)
+
+    @mock.patch("time.sleep", return_value=None)
+    @mock.patch("google.cloud.dataproc_v1.SessionControllerClient")
+    def test_wait_for_session_available_timeout(
+        self, mock_session_controller_client, mock_sleep
+    ):
+        """Test that the method raises RuntimeError on timeout."""
+        mock_client = mock_session_controller_client.return_value
+        session_name = (
+            "projects/test-project/locations/test-region/sessions/test-session"
+        )
+
+        # Session that never gets the endpoint
+        session_pending = Session()
+        session_pending.name = session_name
+
+        mock_client.get_session.return_value = session_pending
+
+        builder = DataprocSparkSession.Builder()
+        builder._session_controller_client = (
+            mock_client  # Inject the mock client
+        )
+
+        with self.assertRaises(RuntimeError) as context:
+            # Use a short timeout for the test
+            builder._wait_for_session_available(session_name, timeout=1)
+
+        self.assertIn(
+            f"Spark Connect endpoint not available for session {session_name}",
+            str(context.exception),
+        )
 
 
 class SessionIdValidationTests(unittest.TestCase):

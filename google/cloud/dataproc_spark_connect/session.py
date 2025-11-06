@@ -67,6 +67,10 @@ SYSTEM_LABELS = {
     "goog-colab-notebook-id",
 }
 
+_DATAPROC_SESSIONS_BASE_URL = (
+    "https://console.cloud.google.com/dataproc/interactive"
+)
+
 
 def _is_valid_label_value(value: str) -> bool:
     """
@@ -494,15 +498,21 @@ class DataprocSparkSession(SparkSession):
             )
 
         def _display_session_link_on_creation(self, session_id):
-            session_url = f"https://console.cloud.google.com/dataproc/interactive/{self._region}/{session_id}?project={self._project_id}"
+            session_url = f"{_DATAPROC_SESSIONS_BASE_URL}/{self._region}/{session_id}?project={self._project_id}"
             plain_message = f"Creating Dataproc Session: {session_url}"
-            html_element = f"""
+            if environment.is_colab_enterprise():
+                html_element = f"""
                 <div>
                     <p>Creating Dataproc Spark Session<p>
-                    <p><a href="{session_url}">Dataproc Session</a></p>
                 </div>
-            """
-
+                """
+            else:
+                html_element = f"""
+                    <div>
+                        <p>Creating Dataproc Spark Session<p>
+                        <p><a href="{session_url}">Dataproc Session</a></p>
+                    </div>
+                """
             self._output_element_or_message(plain_message, html_element)
 
         def _print_session_created_message(self):
@@ -554,7 +564,7 @@ class DataprocSparkSession(SparkSession):
 
             if session_response is not None:
                 print(
-                    f"Using existing Dataproc Session (configuration changes may not be applied): https://console.cloud.google.com/dataproc/interactive/{self._region}/{s8s_session_id}?project={self._project_id}"
+                    f"Using existing Dataproc Session (configuration changes may not be applied): {_DATAPROC_SESSIONS_BASE_URL}/{self._region}/{s8s_session_id}?project={self._project_id}"
                 )
                 self._display_view_session_details_button(s8s_session_id)
                 if session is None:
@@ -576,6 +586,13 @@ class DataprocSparkSession(SparkSession):
 
         def getOrCreate(self) -> "DataprocSparkSession":
             with DataprocSparkSession._lock:
+                if environment.is_dataproc_batch():
+                    # For Dataproc batch workloads, connect to the already initialized local SparkSession
+                    from pyspark.sql import SparkSession as PySparkSQLSession
+
+                    session = PySparkSQLSession.builder.getOrCreate()
+                    return session  # type: ignore
+
                 # Handle custom session ID by setting it early and letting existing logic handle it
                 if self._custom_session_id:
                     self._handle_custom_session_id()
@@ -727,7 +744,7 @@ class DataprocSparkSession(SparkSession):
 
             # Runtime version to server Python version mapping
             RUNTIME_PYTHON_MAP = {
-                "3.0": (3, 11),
+                "3.0": (3, 12),
             }
 
             client_python = sys.version_info[:2]  # (major, minor)
@@ -791,7 +808,7 @@ class DataprocSparkSession(SparkSession):
                 return
 
             try:
-                session_url = f"https://console.cloud.google.com/dataproc/interactive/sessions/{session_id}/locations/{self._region}?project={self._project_id}"
+                session_url = f"{_DATAPROC_SESSIONS_BASE_URL}/{self._region}/{session_id}?project={self._project_id}"
                 from IPython.core.interactiveshell import InteractiveShell
 
                 if not InteractiveShell.initialized():
@@ -998,6 +1015,10 @@ class DataprocSparkSession(SparkSession):
                 total_tasks += stage.num_tasks
                 completed_tasks += stage.num_completed_tasks
 
+            # Don't show progress bar till we receive some tasks
+            if total_tasks == 0:
+                return
+
             tqdm_pbar = notebook_tqdm
             if environment.is_interactive_terminal():
                 tqdm_pbar = cli_tqdm
@@ -1037,13 +1058,11 @@ class DataprocSparkSession(SparkSession):
     @staticmethod
     def _sql_lazy_transformation(req):
         # Select SQL command
-        if req.plan and req.plan.command and req.plan.command.sql_command:
-            return (
-                "select"
-                in req.plan.command.sql_command.sql.strip().lower().split()
-            )
-
-        return False
+        try:
+            query = req.plan.command.sql_command.input.sql.query
+            return "select" in query.strip().lower().split()
+        except AttributeError:
+            return False
 
     def _repr_html_(self) -> str:
         if not self._active_s8s_session_id:
@@ -1051,7 +1070,7 @@ class DataprocSparkSession(SparkSession):
             <div>No Active Dataproc Session</div>
             """
 
-        s8s_session = f"https://console.cloud.google.com/dataproc/interactive/{self._region}/{self._active_s8s_session_id}"
+        s8s_session = f"{_DATAPROC_SESSIONS_BASE_URL}/{self._region}/{self._active_s8s_session_id}"
         ui = f"{s8s_session}/sparkApplications/applications"
         return f"""
         <div>
@@ -1078,7 +1097,7 @@ class DataprocSparkSession(SparkSession):
         )
 
         url = (
-            f"https://console.cloud.google.com/dataproc/interactive/{self._region}/"
+            f"{_DATAPROC_SESSIONS_BASE_URL}/{self._region}/"
             f"{self._active_s8s_session_id}/sparkApplications/application;"
             f"associatedSqlOperationId={operation_id}?project={self._project_id}"
         )
@@ -1170,26 +1189,63 @@ class DataprocSparkSession(SparkSession):
     def _get_active_session_file_path():
         return os.getenv("DATAPROC_SPARK_CONNECT_ACTIVE_SESSION_FILE_PATH")
 
-    def stop(self) -> None:
+    def stop(self, terminate: Optional[bool] = None) -> None:
+        """
+        Stop the Spark session and optionally terminate the server-side session.
+
+        Parameters
+        ----------
+        terminate : bool, optional
+            Control server-side termination behavior.
+
+            - None (default): Auto-detect based on session type
+
+              - Managed sessions (auto-generated ID): terminate server
+              - Named sessions (custom ID): client-side cleanup only
+
+            - True: Always terminate the server-side session
+            - False: Never terminate the server-side session (client cleanup only)
+
+        Examples
+        --------
+        Auto-detect termination behavior (existing behavior):
+
+        >>> spark.stop()
+
+        Force terminate a named session:
+
+        >>> spark.stop(terminate=True)
+
+        Prevent termination of a managed session:
+
+        >>> spark.stop(terminate=False)
+        """
         with DataprocSparkSession._lock:
             if DataprocSparkSession._active_s8s_session_id is not None:
-                # Check if this is a managed session (auto-generated ID) or unmanaged session (custom ID)
-                if DataprocSparkSession._active_session_uses_custom_id:
-                    # Unmanaged session (custom ID): Only clean up client-side state
-                    # Don't terminate as it might be in use by other notebooks or clients
-                    logger.debug(
-                        f"Stopping unmanaged session {DataprocSparkSession._active_s8s_session_id} without termination"
+                # Determine if we should terminate the server-side session
+                if terminate is None:
+                    # Auto-detect: managed sessions terminate, named sessions don't
+                    should_terminate = (
+                        not DataprocSparkSession._active_session_uses_custom_id
                     )
                 else:
-                    # Managed session (auto-generated ID): Use original behavior and terminate
+                    should_terminate = terminate
+
+                if should_terminate:
+                    # Terminate the server-side session
                     logger.debug(
-                        f"Terminating managed session {DataprocSparkSession._active_s8s_session_id}"
+                        f"Terminating session {DataprocSparkSession._active_s8s_session_id}"
                     )
                     terminate_s8s_session(
                         DataprocSparkSession._project_id,
                         DataprocSparkSession._region,
                         DataprocSparkSession._active_s8s_session_id,
                         self._client_options,
+                    )
+                else:
+                    # Client-side cleanup only
+                    logger.debug(
+                        f"Stopping session {DataprocSparkSession._active_s8s_session_id} without termination"
                     )
 
                 self._remove_stopped_session_from_file()

@@ -35,8 +35,12 @@ from google.cloud.dataproc_v1 import (
 )
 
 from pyspark.sql.connect.client.core import ConfigResult
-from pyspark.sql.connect.proto import Command, ConfigResponse, ExecutePlanRequest, Plan, SqlCommand, UserContext
+from pyspark.sql.connect.proto import Command, ConfigResponse, ExecutePlanRequest, Plan, Relation, SQL, SqlCommand, UserContext
 from unittest import mock
+
+_DATAPROC_SESSIONS_BASE_URL = (
+    "https://console.cloud.google.com/dataproc/interactive"
+)
 
 
 class DataprocRemoteSparkSessionBuilderTests(unittest.TestCase):
@@ -163,7 +167,7 @@ class DataprocRemoteSparkSessionBuilderTests(unittest.TestCase):
         mock_ipython_utils = mock.sys.modules[
             "google.cloud.aiplatform.utils"
         ]._ipython_utils
-        test_session_url = f"https://console.cloud.google.com/dataproc/interactive/sessions/{session_id}/locations/test-region?project=test-project"
+        test_session_url = f"{_DATAPROC_SESSIONS_BASE_URL}/test-region/{session_id}?project=test-project"
         mock_display_link = mock_ipython_utils.display_link
         mock.patch.dict(
             os.environ,
@@ -1189,7 +1193,7 @@ class DataprocRemoteSparkSessionBuilderTests(unittest.TestCase):
         mock_ipython_utils = mock.sys.modules[
             "google.cloud.aiplatform.utils"
         ]._ipython_utils
-        test_session_url = "https://console.cloud.google.com/dataproc/interactive/sessions/test_session/locations/test-region?project=test-project"
+        test_session_url = f"{_DATAPROC_SESSIONS_BASE_URL}/test-region/test_session?project=test-project"
 
         mock_display_link = mock_ipython_utils.display_link
         DataprocSparkSession.builder._display_view_session_details_button(
@@ -1229,6 +1233,56 @@ class DataprocRemoteSparkSessionBuilderTests(unittest.TestCase):
             "test_session"
         )
         mock_display_link.assert_not_called()
+
+    @mock.patch(
+        "IPython.core.interactiveshell.InteractiveShell.initialized",
+        return_value=False,
+    )
+    @mock.patch("IPython.display.display")
+    def test_display_session_link_on_creation_colab_enterprise(
+        self,
+        mock_display,
+        _mock_ipy,
+    ):
+        mock.patch.dict(
+            os.environ,
+            {
+                "VERTEX_PRODUCT": "COLAB_ENTERPRISE",
+            },
+        ).start()
+        DataprocSparkSession.builder._display_session_link_on_creation(
+            "test_session"
+        )
+
+        mock_display.assert_called_once()
+        args, _ = mock_display.call_args
+        html_output = args[0].data
+        self.assertIn("Creating Dataproc Spark Session", html_output)
+        self.assertNotIn("Dataproc Session", html_output)
+
+    @mock.patch(
+        "IPython.core.interactiveshell.InteractiveShell.initialized",
+        return_value=False,
+    )
+    @mock.patch("IPython.display.display")
+    def test_display_session_link_on_creation_not_colab_enterprise(
+        self,
+        mock_display,
+        _mock_ipy,
+    ):
+        mock.patch.dict(
+            os.environ,
+            {},
+        ).start()
+        DataprocSparkSession.builder._display_session_link_on_creation(
+            "test_session"
+        )
+
+        mock_display.assert_called_once()
+        args, _ = mock_display.call_args
+        html_output = args[0].data
+        self.assertIn("Creating Dataproc Spark Session", html_output)
+        self.assertIn("Dataproc Session", html_output)
 
     def test_is_valid_label_value(self):
         # Valid label values
@@ -1680,7 +1734,13 @@ class DataprocSparkConnectClientTest(unittest.TestCase):
         test_execute_plan_request_1: ExecutePlanRequest = ExecutePlanRequest(
             session_id="mock-session_id-from-super",
             client_type="mock-client_type-from-super",
-            plan=Plan(command=Command(sql_command=SqlCommand(sql="SELECT 1"))),
+            plan=Plan(
+                command=Command(
+                    sql_command=SqlCommand(
+                        input=Relation(sql=SQL(query="SELECT 1"))
+                    )
+                )
+            ),
             tags=["mock-tag-from-super"],
             user_context=UserContext(user_id="mock-user-from-super"),
             operation_id=test_uuid,
@@ -1690,7 +1750,11 @@ class DataprocSparkConnectClientTest(unittest.TestCase):
             client_type="mock-client_type-from-super",
             plan=Plan(
                 command=Command(
-                    sql_command=SqlCommand(sql="INSERT INTO test_table_2 ...")
+                    sql_command=SqlCommand(
+                        input=Relation(
+                            sql=SQL(query="INSERT INTO test_table_2 ...")
+                        )
+                    )
                 )
             ),
             tags=["mock-tag-from-super"],
@@ -1703,7 +1767,9 @@ class DataprocSparkConnectClientTest(unittest.TestCase):
             plan=Plan(
                 command=Command(
                     sql_command=SqlCommand(
-                        sql="DROP TABLE IF EXISTS selections"
+                        input=Relation(
+                            sql=SQL(query="DROP TABLE IF EXISTS selections")
+                        )
                     )
                 )
             ),

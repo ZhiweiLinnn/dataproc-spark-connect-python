@@ -664,3 +664,130 @@ def test_sparksql_magic_with_dataproc_session(connect_session):
     assert row["multiplication"] == 50
     assert row["square_root"] == 4.0
     assert row["joined_string"] == "Dataproc-Spark"
+
+
+def test_stop_named_session_with_terminate_true(
+    auth_type,
+    test_project,
+    test_region,
+    session_controller_client,
+    os_environment,
+):
+    """Test that stop(terminate=True) terminates a named session on the server."""
+    # Use a randomized session ID to avoid conflicts
+    custom_session_id = f"test-terminate-true-{uuid.uuid4().hex[:8]}"
+
+    # Create a session with custom ID
+    spark = (
+        DataprocSparkSession.builder.dataprocSessionId(custom_session_id)
+        .projectId(test_project)
+        .location(test_region)
+        .getOrCreate()
+    )
+
+    # Verify session is created
+    assert DataprocSparkSession._active_s8s_session_id == custom_session_id
+    session_name = f"projects/{test_project}/locations/{test_region}/sessions/{custom_session_id}"
+
+    # Test basic functionality
+    df = spark.createDataFrame([(1, "test")], ["id", "value"])
+    assert df.count() == 1
+
+    # Stop with terminate=True
+    spark.stop(terminate=True)
+
+    # Verify client-side cleanup
+    assert DataprocSparkSession._active_s8s_session_id is None
+
+    # Verify server-side session is terminating or terminated
+    get_session_request = GetSessionRequest()
+    get_session_request.name = session_name
+    session = session_controller_client.get_session(get_session_request)
+
+    assert session.state in [
+        Session.State.TERMINATING,
+        Session.State.TERMINATED,
+    ]
+
+
+def test_stop_managed_session_with_terminate_false(
+    auth_type,
+    test_project,
+    test_region,
+    session_controller_client,
+    os_environment,
+):
+    """Test that stop(terminate=False) does NOT terminate a managed session on the server."""
+    # Create a managed session (auto-generated ID)
+    spark = (
+        DataprocSparkSession.builder.projectId(test_project)
+        .location(test_region)
+        .getOrCreate()
+    )
+
+    # Verify it's a managed session (auto-generated ID)
+    assert DataprocSparkSession._active_s8s_session_id is not None
+    assert DataprocSparkSession._active_session_uses_custom_id is False
+    session_id = DataprocSparkSession._active_s8s_session_id
+    session_name = (
+        f"projects/{test_project}/locations/{test_region}/sessions/{session_id}"
+    )
+
+    # Test basic functionality
+    df = spark.createDataFrame([(1, "test")], ["id", "value"])
+    assert df.count() == 1
+
+    # Stop with terminate=False (prevent server-side termination)
+    spark.stop(terminate=False)
+
+    # Verify client-side cleanup
+    assert DataprocSparkSession._active_s8s_session_id is None
+
+    # Verify server-side session is still ACTIVE (not terminated)
+    get_session_request = GetSessionRequest()
+    get_session_request.name = session_name
+    session = session_controller_client.get_session(get_session_request)
+
+    assert session.state == Session.State.ACTIVE
+
+    # Clean up: terminate the session manually
+    terminate_session_request = TerminateSessionRequest()
+    terminate_session_request.name = session_name
+    session_controller_client.terminate_session(terminate_session_request)
+
+
+@pytest.fixture
+def batch_workload_env(monkeypatch):
+    """Sets DATAPROC_WORKLOAD_TYPE to 'batch' for a test."""
+    monkeypatch.setenv("DATAPROC_WORKLOAD_TYPE", "batch")
+
+
+@pytest.fixture
+def local_spark_session():
+    """Provides a standard local PySpark session for comparison."""
+    from pyspark.sql import SparkSession as PySparkSession
+
+    # Stop any existing session to ensure a clean environment for creating a local session.
+    # This prevents test isolation failures where a Dataproc session from a previous
+    # test might be picked up by getOrCreate().
+    if DataprocSparkSession.getActiveSession():
+        DataprocSparkSession.getActiveSession().stop()
+
+    session = PySparkSession.builder.master("local").getOrCreate()
+    yield session
+    session.stop()
+
+
+def test_create_local_spark_session(batch_workload_env, local_spark_session):
+    """Test creating a local Spark session."""
+    from pyspark.sql import SparkSession as PySparkSession
+
+    dataproc_spark_session = DataprocSparkSession.builder.getOrCreate()
+    try:
+        assert isinstance(dataproc_spark_session, PySparkSession)
+        assert not isinstance(dataproc_spark_session, DataprocSparkSession)
+
+        # Compare configurations to ensure they are both local sessions
+        assert dataproc_spark_session == local_spark_session
+    finally:
+        dataproc_spark_session.stop()

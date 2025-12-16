@@ -613,6 +613,23 @@ class DataprocSparkSession(SparkSession):
             """Handle custom session ID by checking if it exists and setting _active_s8s_session_id."""
             session_response = self._get_session_by_id(self._custom_session_id)
             if session_response is not None:
+                attached_notebook_id = session_response.labels.get("goog-colab-notebook-id", "None")
+                
+                # Get the current Notebook ID from the environment
+                current_notebook_raw = os.environ.get("COLAB_NOTEBOOK_ID", "")
+                current_notebook_id = os.path.basename(current_notebook_raw) if current_notebook_raw else "Unknown"
+
+                logger.info(
+                    f"DEBUG: Found session '{self._custom_session_id}'.\n"
+                    f"   - Session is owned by Notebook ID: {attached_notebook_id}\n"
+                    f"   - You are running in Notebook ID:  {current_notebook_id}"
+                )
+                
+                if attached_notebook_id != current_notebook_id:
+                    logger.warning(
+                        "Session ownership mismatch. The Dataproc Side Panel will NOT display this session "
+                        "because it is attached to a different notebook."
+                    )
                 # Found an active session with the custom ID, set it as the active session
                 DataprocSparkSession._active_s8s_session_id = (
                     self._custom_session_id

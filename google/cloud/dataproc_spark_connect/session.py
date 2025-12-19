@@ -612,55 +612,67 @@ class DataprocSparkSession(SparkSession):
 
                 return session
         def _sync_session_id_to_notebook_metadata(self, session_uuid: str):
-                    """Updates the NotebookRuntime labels with the active Dataproc Session UUID."""
-                    import requests
+                    """Updates the NotebookRuntime labels using the Repository ID from environment."""
                     print(f"DEBUG: Attempting to sync Dataproc Session {session_uuid}...")
                     
                     try:
-                        # 1. Fetch the REAL runtime name from the local Metadata Server
-                        # This bypasses the need for 'list' permissions and ignores the Repo ID
-                        metadata_url = "http://metadata.google.internal/computeMetadata/v1/instance/attributes/notebook-runtime-name"
-                        headers = {"Metadata-Flavor": "Google"}
-                        
-                        print("DEBUG: Fetching runtime name from Metadata Server...")
-                        response = requests.get(metadata_url, headers=headers, timeout=5)
-                        
-                        if response.status_code != 200:
-                            print(f"❌ DEBUG: Metadata server returned {response.status_code}. Cannot identify runtime.")
+                        # 1. Extract the unique Repository UUID from the environment variable
+                        raw_id = os.environ.get("COLAB_NOTEBOOK_ID", "")
+                        # Extract the UUID part (7617297d-7c3d-4a19-87ce-239d1eecf175)
+                        import re
+                        match = re.search(r"repositories/([a-f0-9-]+)", raw_id)
+                        if not match:
+                            print(f"DEBUG: Could not find repository UUID in {raw_id}")
                             return
                         
-                        # The metadata server returns the full resource name: 
-                        # projects/.../locations/.../notebookRuntimes/...
-                        runtime_name = response.text.strip()
-                        print(f"DEBUG: Internal Metadata found Runtime: {runtime_name}")
+                        repo_uuid = match.group(1)
+                        print(f"DEBUG: Searching for runtimes linked to Repo: {repo_uuid}")
 
-                        # 2. Initialize AI Platform Client
+                        # 2. Setup AI Platform Client
+                        parent = f"projects/{self._project_id}/locations/{self._region}"
                         endpoint = f"{self._region}-aiplatform.googleapis.com"
                         client = aiplatform_v1.NotebookServiceClient(client_options={"api_endpoint": endpoint})
 
-                        # 3. Get the object to check labels
-                        runtime = client.get_notebook_runtime(name=runtime_name)
+                        # 3. List runtimes with a FILTER
+                        # We look for runtimes where the display name or internal labels match your session
+                        # or simply list all and match the repo UUID in the backend
+                        runtimes = client.list_notebook_runtimes(parent=parent)
                         
-                        old_session_label = runtime.labels.get("active-dataproc-session", "None")
-                        if old_session_label == session_uuid:
-                            print("DEBUG: Label already matches. Skipping update.")
+                        target_runtime = None
+                        for runtime in runtimes:
+                            # Check if this runtime belongs to your specific repository/workspace
+                            # Most embedded runtimes include the repo ID in their labels or description
+                            if repo_uuid in str(runtime):
+                                target_runtime = runtime
+                                break
+
+                        if not target_runtime:
+                            print(f"❌ DEBUG: No running runtime found linked to repo {repo_uuid}")
                             return
 
-                        # 4. Update the label
-                        runtime.labels["active-dataproc-session"] = session_uuid
+                        runtime_name = target_runtime.name
+                        print(f"DEBUG: Found target runtime: {runtime_name}")
+
+                        # 4. Check and Update
+                        old_label = target_runtime.labels.get("active-dataproc-session", "None")
+                        if old_label == session_uuid:
+                            print("DEBUG: Metadata already up to date.")
+                            return
+
+                        target_runtime.labels["active-dataproc-session"] = session_uuid
                         update_mask = field_mask_pb2.FieldMask(paths=["labels"])
+                        
                         request = aiplatform_v1.UpdateNotebookRuntimeRequest(
-                            notebook_runtime=runtime, 
+                            notebook_runtime=target_runtime, 
                             update_mask=update_mask
                         )
                         
-                        print(f"DEBUG: Updating labels on {runtime_name}...")
+                        print(f"DEBUG: Submitting update request...")
                         client.update_notebook_runtime(request=request)
-                        print(f"✅ DEBUG: Metadata successfully updated.")
+                        print(f"✅ DEBUG: Metadata synced successfully.")
 
                     except Exception as e:
-                        print(f"❌ DEBUG ERROR: Metadata sync failed.")
-                        print(f"❌ ERROR DETAILS: {str(e)}")
+                        print(f"❌ DEBUG ERROR: Sync failed: {str(e)}")
 
         def _handle_custom_session_id(self):
             """Handle custom session ID by checking if it exists and setting _active_s8s_session_id."""

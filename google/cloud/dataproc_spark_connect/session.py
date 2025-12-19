@@ -56,6 +56,9 @@ from google.cloud.dataproc_v1.types import sessions
 from google.cloud.dataproc_spark_connect import environment
 from pyspark.sql.connect.session import SparkSession
 from pyspark.sql.utils import to_str
+from google.cloud import aiplatform_v1
+from google.protobuf import field_mask_pb2
+import os
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -609,37 +612,74 @@ class DataprocSparkSession(SparkSession):
 
                 return session
 
+        def _sync_session_id_to_notebook_metadata(self, session_uuid: str):
+            """Updates the NotebookRuntime labels with the active Dataproc Session UUID."""
+            logger.info(f"Attempting to sync Dataproc Session {session_uuid} to Notebook Runtime metadata...")
+            
+            try:
+                # 1. Identify current notebook resource
+                runtime_name = os.environ.get("COLAB_NOTEBOOK_ID") 
+                if not runtime_name:
+                    logger.warning("COLAB_NOTEBOOK_ID not found in environment. Side panel may not auto-connect.")
+                    return
+
+                logger.info(f"Target Notebook Runtime identified: {runtime_name}")
+
+                # 2. Initialize the client
+                endpoint = f"{self._region}-aiplatform.googleapis.com"
+                client_options = {"api_endpoint": endpoint}
+                client = aiplatform_v1.NotebookServiceClient(client_options=client_options)
+                
+                # 3. Get the existing runtime and inspect current labels
+                logger.debug(f"Fetching current runtime details from {endpoint}...")
+                runtime = client.get_notebook_runtime(name=runtime_name)
+                
+                old_session_label = runtime.labels.get("active-dataproc-session", "None")
+                logger.info(f"Current session label on runtime: {old_session_label}")
+
+                # 4. Update labels if they have changed
+                if old_session_label == session_uuid:
+                    logger.info("Notebook Runtime already tagged with this Session UUID. Skipping update.")
+                    return
+
+                runtime.labels["active-dataproc-session"] = session_uuid
+                
+                # 5. Perform the update
+                update_mask = field_mask_pb2.FieldMask(paths=["labels"])
+                request = aiplatform_v1.UpdateNotebookRuntimeRequest(
+                    notebook_runtime=runtime, 
+                    update_mask=update_mask
+                )
+                
+                logger.debug(f"Sending UpdateNotebookRuntimeRequest for {runtime_name}...")
+                client.update_notebook_runtime(request=request)
+                
+                logger.info(
+                    f"Handshake complete. Updated 'active-dataproc-session' label "
+                    f"from [{old_session_label}] to [{session_uuid}]."
+                )
+
+            except Exception as e:
+                # Use logger.error or logger.exception to capture the traceback if this is critical
+                logger.error(f"Metadata sync failed for Session {session_uuid}. Error: {str(e)}")
+                # We don't re-raise so that the SparkSession creation doesn't fail for the user
+
         def _handle_custom_session_id(self):
             """Handle custom session ID by checking if it exists and setting _active_s8s_session_id."""
             session_response = self._get_session_by_id(self._custom_session_id)
             if session_response is not None:
-                attached_notebook_id = session_response.labels.get("goog-colab-notebook-id", "None")
-                
-                # Get the current Notebook ID from the environment
-                current_notebook_raw = os.environ.get("COLAB_NOTEBOOK_ID", "")
-                current_notebook_id = os.path.basename(current_notebook_raw) if current_notebook_raw else "Unknown"
-
-                print(
-                    f"DEBUG: Found session '{self._custom_session_id}'.\n"
-                    f"   - Session is owned by Notebook ID: {attached_notebook_id}\n"
-                    f"   - You are running in Notebook ID:  {current_notebook_id}"
-                )
-                
-                if attached_notebook_id != current_notebook_id:
-                    logger.warning(
-                        "Session ownership mismatch. The Dataproc Side Panel will NOT display this session "
-                        "because it is attached to a different notebook. attached_notebook_id: "
-                        f"{attached_notebook_id}, current_notebook_id: {current_notebook_id}"
-                    )
                 # Found an active session with the custom ID, set it as the active session
                 DataprocSparkSession._active_s8s_session_id = (
                     self._custom_session_id
                 )
-                # Mark that this session uses a custom ID
                 DataprocSparkSession._active_session_uses_custom_id = True
+
+                # --- FIX START: Sync the Shared Session ID to this Notebook's Metadata ---
+                # This allows the Frontend to find Notebook A's session from Notebook B
+                self._sync_session_id_to_notebook_metadata(session_response.uuid)
+                # --- FIX END ---
+                
             else:
-                # No existing session found, clear any existing active session ID
-                # so we'll create a new one with the custom ID
                 DataprocSparkSession._active_s8s_session_id = None
 
         def _get_dataproc_config(self):

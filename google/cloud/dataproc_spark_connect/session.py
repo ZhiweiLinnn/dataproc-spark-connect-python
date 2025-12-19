@@ -613,50 +613,55 @@ class DataprocSparkSession(SparkSession):
                 return session
         def _sync_session_id_to_notebook_metadata(self, session_uuid: str):
                     """Updates the NotebookRuntime labels with the active Dataproc Session UUID."""
-                    print(f"DEBUG: Attempting to sync Dataproc Session {session_uuid} to Notebook Runtime metadata...")
+                    print(f"DEBUG: Attempting to sync Dataproc Session {session_uuid}...")
                     
                     try:
-                        # 1. Identify and Clean the notebook resource name
-                        raw_runtime_name = os.environ.get("COLAB_NOTEBOOK_ID") 
-                        if not raw_runtime_name:
-                            print("DEBUG: COLAB_NOTEBOOK_ID not found in environment.")
-                            return
-
-                        # FIX: Strip the '/embedded/' prefix if it exists and fix encoding
-                        # From: /embedded/projects/google.com%3Ahadoop-cloud-dev/...
-                        # To: projects/google.com:hadoop-cloud-dev/...
-                        runtime_name = raw_runtime_name.replace("/embedded/", "").replace("%3A", ":")
-
-                        print(f"DEBUG: Cleaned Runtime Name: {runtime_name}")
-
-                        # 2. Initialize the client
+                        # 1. Setup Client and Project Info
+                        # We extract the project and location from your existing builder variables
+                        parent = f"projects/{self._project_id}/locations/{self._region}"
                         endpoint = f"{self._region}-aiplatform.googleapis.com"
-                        client_options = {"api_endpoint": endpoint}
-                        client = aiplatform_v1.NotebookServiceClient(client_options=client_options)
-                        
-                        # 3. Get the existing runtime
-                        print(f"DEBUG: Fetching runtime details...")
-                        runtime = client.get_notebook_runtime(name=runtime_name)
-                        
-                        # ... rest of your code remains the same ...
-                        old_session_label = runtime.labels.get("active-dataproc-session", "None")
-                        print(f"DEBUG: Current label: {old_session_label}")
+                        client = aiplatform_v1.NotebookServiceClient(client_options={"api_endpoint": endpoint})
 
-                        if old_session_label == session_uuid:
-                            print("DEBUG: Already tagged. Skipping.")
+                        # 2. Find the current runtime
+                        # We list runtimes and look for the one that is currently 'ACTUAL' or 'ACTIVE'
+                        # and matches the current environment.
+                        print(f"DEBUG: Searching for active runtime in {parent}...")
+                        runtimes = client.list_notebook_runtimes(parent=parent)
+                        
+                        target_runtime = None
+                        for runtime in runtimes:
+                            # We check for the runtime that is currently in use. 
+                            # In these environments, the runtime name usually ends with a specific ID.
+                            if runtime.runtime_state == aiplatform_v1.NotebookRuntime.RuntimeState.RUNNING:
+                                target_runtime = runtime
+                                break
+
+                        if not target_runtime:
+                            print("❌ DEBUG: Could not find a RUNNING notebook runtime to tag.")
                             return
 
-                        runtime.labels["active-dataproc-session"] = session_uuid
+                        runtime_name = target_runtime.name
+                        print(f"DEBUG: Found Active Runtime: {runtime_name}")
+
+                        # 3. Check and Update Labels
+                        old_session_label = target_runtime.labels.get("active-dataproc-session", "None")
+                        if old_session_label == session_uuid:
+                            print("DEBUG: Label already matches. Skipping update.")
+                            return
+
+                        # Update the object
+                        target_runtime.labels["active-dataproc-session"] = session_uuid
                         
+                        # 4. Perform the Update
                         update_mask = field_mask_pb2.FieldMask(paths=["labels"])
                         request = aiplatform_v1.UpdateNotebookRuntimeRequest(
-                            notebook_runtime=runtime, 
+                            notebook_runtime=target_runtime, 
                             update_mask=update_mask
                         )
                         
-                        print(f"DEBUG: Updating metadata...")
+                        print(f"DEBUG: Updating labels on {runtime_name}...")
                         client.update_notebook_runtime(request=request)
-                        print(f"✅ DEBUG: Metadata successfully updated to {session_uuid}")
+                        print(f"✅ DEBUG: Metadata successfully updated.")
 
                     except Exception as e:
                         print(f"❌ DEBUG ERROR: Metadata sync failed.")

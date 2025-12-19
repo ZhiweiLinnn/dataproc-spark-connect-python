@@ -616,51 +616,50 @@ class DataprocSparkSession(SparkSession):
                     print(f"DEBUG: Attempting to sync Dataproc Session {session_uuid} to Notebook Runtime metadata...")
                     
                     try:
-                        # 1. Identify current notebook resource
-                        runtime_name = os.environ.get("COLAB_NOTEBOOK_ID") 
-                        if not runtime_name:
-                            print("DEBUG: COLAB_NOTEBOOK_ID not found in environment. Side panel may not auto-connect.")
+                        # 1. Identify and Clean the notebook resource name
+                        raw_runtime_name = os.environ.get("COLAB_NOTEBOOK_ID") 
+                        if not raw_runtime_name:
+                            print("DEBUG: COLAB_NOTEBOOK_ID not found in environment.")
                             return
 
-                        print(f"DEBUG: Target Notebook Runtime identified: {runtime_name}")
+                        # FIX: Strip the '/embedded/' prefix if it exists and fix encoding
+                        # From: /embedded/projects/google.com%3Ahadoop-cloud-dev/...
+                        # To: projects/google.com:hadoop-cloud-dev/...
+                        runtime_name = raw_runtime_name.replace("/embedded/", "").replace("%3A", ":")
+
+                        print(f"DEBUG: Cleaned Runtime Name: {runtime_name}")
 
                         # 2. Initialize the client
                         endpoint = f"{self._region}-aiplatform.googleapis.com"
                         client_options = {"api_endpoint": endpoint}
                         client = aiplatform_v1.NotebookServiceClient(client_options=client_options)
                         
-                        # 3. Get the existing runtime and inspect current labels
-                        print(f"DEBUG: Fetching current runtime details from {endpoint}...")
+                        # 3. Get the existing runtime
+                        print(f"DEBUG: Fetching runtime details...")
                         runtime = client.get_notebook_runtime(name=runtime_name)
                         
+                        # ... rest of your code remains the same ...
                         old_session_label = runtime.labels.get("active-dataproc-session", "None")
-                        print(f"DEBUG: Current session label on runtime: {old_session_label}")
+                        print(f"DEBUG: Current label: {old_session_label}")
 
-                        # 4. Update labels if they have changed
                         if old_session_label == session_uuid:
-                            print("DEBUG: Notebook Runtime already tagged with this Session UUID. Skipping update.")
+                            print("DEBUG: Already tagged. Skipping.")
                             return
 
                         runtime.labels["active-dataproc-session"] = session_uuid
                         
-                        # 5. Perform the update
                         update_mask = field_mask_pb2.FieldMask(paths=["labels"])
                         request = aiplatform_v1.UpdateNotebookRuntimeRequest(
                             notebook_runtime=runtime, 
                             update_mask=update_mask
                         )
                         
-                        print(f"DEBUG: Sending UpdateNotebookRuntimeRequest for {runtime_name}...")
+                        print(f"DEBUG: Updating metadata...")
                         client.update_notebook_runtime(request=request)
-                        
-                        print(
-                            f"DEBUG: Handshake complete. Updated 'active-dataproc-session' label "
-                            f"from [{old_session_label}] to [{session_uuid}]."
-                        )
+                        print(f"✅ DEBUG: Metadata successfully updated to {session_uuid}")
 
                     except Exception as e:
-                        # Critical: Print the error so it shows up in the notebook cell
-                        print(f"❌ DEBUG ERROR: Metadata sync failed for Session {session_uuid}.")
+                        print(f"❌ DEBUG ERROR: Metadata sync failed.")
                         print(f"❌ ERROR DETAILS: {str(e)}")
 
         def _handle_custom_session_id(self):

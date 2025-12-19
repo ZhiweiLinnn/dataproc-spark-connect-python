@@ -56,8 +56,6 @@ from google.cloud.dataproc_v1.types import sessions
 from google.cloud.dataproc_spark_connect import environment
 from pyspark.sql.connect.session import SparkSession
 from pyspark.sql.utils import to_str
-from google.cloud import aiplatform_v1
-from google.protobuf import field_mask_pb2
 import os
 
 # Set up logging
@@ -611,69 +609,6 @@ class DataprocSparkSession(SparkSession):
                 PySparkSQLSession._instantiatedSession = session
 
                 return session
-        def _sync_session_id_to_notebook_metadata(self, session_uuid: str):
-                    """Updates the NotebookRuntime labels using the Repository ID from environment."""
-                    print(f"DEBUG: Attempting to sync Dataproc Session {session_uuid}...")
-                    
-                    try:
-                        # 1. Extract the unique Repository UUID from the environment variable
-                        raw_id = os.environ.get("COLAB_NOTEBOOK_ID", "")
-                        # Extract the UUID part (7617297d-7c3d-4a19-87ce-239d1eecf175)
-                        import re
-                        match = re.search(r"repositories/([a-f0-9-]+)", raw_id)
-                        if not match:
-                            print(f"DEBUG: Could not find repository UUID in {raw_id}")
-                            return
-                        
-                        repo_uuid = match.group(1)
-                        print(f"DEBUG: Searching for runtimes linked to Repo: {repo_uuid}")
-
-                        # 2. Setup AI Platform Client
-                        parent = f"projects/{self._project_id}/locations/{self._region}"
-                        endpoint = f"{self._region}-aiplatform.googleapis.com"
-                        client = aiplatform_v1.NotebookServiceClient(client_options={"api_endpoint": endpoint})
-
-                        # 3. List runtimes with a FILTER
-                        # We look for runtimes where the display name or internal labels match your session
-                        # or simply list all and match the repo UUID in the backend
-                        runtimes = client.list_notebook_runtimes(parent=parent)
-                        
-                        target_runtime = None
-                        for runtime in runtimes:
-                            # Check if this runtime belongs to your specific repository/workspace
-                            # Most embedded runtimes include the repo ID in their labels or description
-                            if repo_uuid in str(runtime):
-                                target_runtime = runtime
-                                break
-
-                        if not target_runtime:
-                            print(f"❌ DEBUG: No running runtime found linked to repo {repo_uuid}")
-                            return
-
-                        runtime_name = target_runtime.name
-                        print(f"DEBUG: Found target runtime: {runtime_name}")
-
-                        # 4. Check and Update
-                        old_label = target_runtime.labels.get("active-dataproc-session", "None")
-                        if old_label == session_uuid:
-                            print("DEBUG: Metadata already up to date.")
-                            return
-
-                        target_runtime.labels["active-dataproc-session"] = session_uuid
-                        update_mask = field_mask_pb2.FieldMask(paths=["labels"])
-                        
-                        request = aiplatform_v1.UpdateNotebookRuntimeRequest(
-                            notebook_runtime=target_runtime, 
-                            update_mask=update_mask
-                        )
-                        
-                        print(f"DEBUG: Submitting update request...")
-                        client.update_notebook_runtime(request=request)
-                        print(f"✅ DEBUG: Metadata synced successfully.")
-
-                    except Exception as e:
-                        print(f"❌ DEBUG ERROR: Sync failed: {str(e)}")
-
         def _handle_custom_session_id(self):
             """Handle custom session ID by checking if it exists and setting _active_s8s_session_id."""
             session_response = self._get_session_by_id(self._custom_session_id)
@@ -683,11 +618,6 @@ class DataprocSparkSession(SparkSession):
                     self._custom_session_id
                 )
                 DataprocSparkSession._active_session_uses_custom_id = True
-
-                # --- FIX START: Sync the Shared Session ID to this Notebook's Metadata ---
-                # This allows the Frontend to find Notebook A's session from Notebook B
-                self._sync_session_id_to_notebook_metadata(session_response.uuid)
-                # --- FIX END ---
                 
             else:
                 DataprocSparkSession._active_s8s_session_id = None
